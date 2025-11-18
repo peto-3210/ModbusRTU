@@ -1,21 +1,22 @@
 #include <Arduino.h>
 
-/*Modbus is implemented as non-inverted UART with even parity and 1 stop bit. Only
-ReadInputRegisters, ReadHoldingRegisters and WriteSingleRegister functions are implemented, so the
-standard request packet should consist of 6 bytes + CRC (2 bytes). Protocol data, such as 
-number of registers and first register address are transmitted in big endian, payload (and CRC)
-is transmitted "as is" (little endian).
+/*Modbus is implemented as non-inverted UART with even parity and 1 stop bit (according to standard). 
+Only ReadInputRegisters, ReadHoldingRegisters and WriteSingleRegister functions are implemented, so the
+standard request packet should consist of 6 bytes + CRC (2 bytes). This can be utilized in various cases,
+like DMA reading, etc. Protocol data, such as are transmitted in big endian.
 */
 
-#define BAUD_RATE 115200 //change
-#define CONFIG SERIAL_8E1
+//Adjust if necessary
+#define INPUT_REGISTER_NUM 100
+#define HOLDING_REGISTER_NUM 100
+#define USE_EXTERNALL_INPUT_REGISTER_BUFFER false
+#define USE_EXTERNALL_HOLDING_REGISTER_BUFFER false
 
-//ModbusRTU variables
-#define MY_ADDRESS 1 //change
+
+//ModbusRTU defines (do not change)
 #define MODBUS_REQUEST_BASE_LENGTH 6
-#define MODBUS_READ_RESPONSE_BASE_LEN 3
+#define MODBUS_RESPONSE_BASE_LEN 3
 #define CRC_LEN 2
-#define SINGLE_READ_RESPONSE_LEN 5
 
 #define FC_READ_HOLDING_REGISTERS 3
 #define FC_READ_INPUT_REGISTERS 4
@@ -25,12 +26,8 @@ is transmitted "as is" (little endian).
 #define EX_ILLEGAL_FUNCTION 1
 #define EX_ILLEGAL_ADDRESS 2
 //#define EX_SERVER_BUSY 6
-
-uint16_t* INPUT_REGISTERS;
-uint16_t INPUT_REGISTERS_NUM = 0;
-uint16_t* COMMAND_REGISTERS;
-uint16_t COMMAND_REGISTERS_NUM = 0;
-
+#define MAX_READ_REGISTER_COUNT 125
+#define MAX_WRITE_REGISTER_COUNT 123
 
 //Used to put 16-bit value into buffer of bytes
 #define put_16bit_into_byte_buffer(buffer, offset, value) {(buffer)[(offset) + 1] = ((value) & 0xff00) >> 8; (buffer)[(offset)] = (value) & 0xff;}
@@ -41,38 +38,238 @@ uint16_t COMMAND_REGISTERS_NUM = 0;
 //Used to swap endianity
 #define endianity_swap_16bit(value) ((uint16_t)(((value) & 0xff) << 8) | (((value) & 0xff00) >> 8))
 
-//Main functions
-/**
- * @brief Initializes UART for modbus
- */
-void initModbus();
+//Packet struct
+typedef union {
+    uint8_t raw_data[MODBUS_REQUEST_BASE_LENGTH + CRC_LEN + 1];
+    struct {
+        uint8_t address;
+        uint8_t function_code;
+        uint16_t first_register;
+        union {
+            uint16_t register_count;
+            uint16_t single_register_data;
+        };
+        //Last register will hold CRC data
+        uint16_t crc;
+    };
+} request_packet; 
 
-/**
- * @brief Main loop for communication.
- * @return New command, -1 if none has arrived
- */
-int16_t communicationLoop();
+typedef struct {
+    void* serial;
+    unsigned long timeout;
+    unsigned long lastTimestamp;
+    bool newDataDetected;
+} SerialCtx;
 
-/**
- * @brief Sets buffer for input registers
- * @param inputs Input registers
- * @param size Length of buffer
- */
-void SetInputRegistersBuffer(uint16_t* inputs, uint16_t size){
-    INPUT_REGISTERS = inputs;
-    INPUT_REGISTERS_NUM = size;
-}
 
-/**
- * @brief Sets buffer for input registers
- * @param inputs Input registers
- * @param size Length of buffer
- */
-void SetCommandRegistersBuffer(uint16_t* inputs, uint16_t size){
-    COMMAND_REGISTERS = inputs;
-    COMMAND_REGISTERS_NUM = size;
-}
+//CRC table
+static const uint16_t crc_table[256] = {
+	0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
+	0xC601, 0x06C0, 0x0780, 0xC741, 0x0500, 0xC5C1, 0xC481, 0x0440,
+	0xCC01, 0x0CC0, 0x0D80, 0xCD41, 0x0F00, 0xCFC1, 0xCE81, 0x0E40,
+	0x0A00, 0xCAC1, 0xCB81, 0x0B40, 0xC901, 0x09C0, 0x0880, 0xC841,
+	0xD801, 0x18C0, 0x1980, 0xD941, 0x1B00, 0xDBC1, 0xDA81, 0x1A40,
+	0x1E00, 0xDEC1, 0xDF81, 0x1F40, 0xDD01, 0x1DC0, 0x1C80, 0xDC41,
+	0x1400, 0xD4C1, 0xD581, 0x1540, 0xD701, 0x17C0, 0x1680, 0xD641,
+	0xD201, 0x12C0, 0x1380, 0xD341, 0x1100, 0xD1C1, 0xD081, 0x1040,
+	0xF001, 0x30C0, 0x3180, 0xF141, 0x3300, 0xF3C1, 0xF281, 0x3240,
+	0x3600, 0xF6C1, 0xF781, 0x3740, 0xF501, 0x35C0, 0x3480, 0xF441,
+	0x3C00, 0xFCC1, 0xFD81, 0x3D40, 0xFF01, 0x3FC0, 0x3E80, 0xFE41,
+	0xFA01, 0x3AC0, 0x3B80, 0xFB41, 0x3900, 0xF9C1, 0xF881, 0x3840,
+	0x2800, 0xE8C1, 0xE981, 0x2940, 0xEB01, 0x2BC0, 0x2A80, 0xEA41,
+	0xEE01, 0x2EC0, 0x2F80, 0xEF41, 0x2D00, 0xEDC1, 0xEC81, 0x2C40,
+	0xE401, 0x24C0, 0x2580, 0xE541, 0x2700, 0xE7C1, 0xE681, 0x2640,
+	0x2200, 0xE2C1, 0xE381, 0x2340, 0xE101, 0x21C0, 0x2080, 0xE041,
+	0xA001, 0x60C0, 0x6180, 0xA141, 0x6300, 0xA3C1, 0xA281, 0x6240,
+	0x6600, 0xA6C1, 0xA781, 0x6740, 0xA501, 0x65C0, 0x6480, 0xA441,
+	0x6C00, 0xACC1, 0xAD81, 0x6D40, 0xAF01, 0x6FC0, 0x6E80, 0xAE41,
+	0xAA01, 0x6AC0, 0x6B80, 0xAB41, 0x6900, 0xA9C1, 0xA881, 0x6840,
+	0x7800, 0xB8C1, 0xB981, 0x7940, 0xBB01, 0x7BC0, 0x7A80, 0xBA41,
+	0xBE01, 0x7EC0, 0x7F80, 0xBF41, 0x7D00, 0xBDC1, 0xBC81, 0x7C40,
+	0xB401, 0x74C0, 0x7580, 0xB541, 0x7700, 0xB7C1, 0xB681, 0x7640,
+	0x7200, 0xB2C1, 0xB381, 0x7340, 0xB101, 0x71C0, 0x7080, 0xB041,
+	0x5000, 0x90C1, 0x9181, 0x5140, 0x9301, 0x53C0, 0x5280, 0x9241,
+	0x9601, 0x56C0, 0x5780, 0x9741, 0x5500, 0x95C1, 0x9481, 0x5440,
+	0x9C01, 0x5CC0, 0x5D80, 0x9D41, 0x5F00, 0x9FC1, 0x9E81, 0x5E40,
+	0x5A00, 0x9AC1, 0x9B81, 0x5B40, 0x9901, 0x59C0, 0x5880, 0x9841,
+	0x8801, 0x48C0, 0x4980, 0x8941, 0x4B00, 0x8BC1, 0x8A81, 0x4A40,
+	0x4E00, 0x8EC1, 0x8F81, 0x4F40, 0x8D01, 0x4DC0, 0x4C80, 0x8C41,
+	0x4400, 0x84C1, 0x8581, 0x4540, 0x8701, 0x47C0, 0x4680, 0x8641,
+	0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040 };
 
+extern bool defaultSerialReadFunction(char* buffer, void* ctx);
+extern void defaultSerialWriteFunction(const char* buffer, uint16_t length, void* ctx);
+
+class ModbusRTU{
+
+    private:
+    uint16_t deviceAddress;
+
+    unsigned long timeout = 0; //Milliseconds
+    unsigned long lastTimestamp = 0;
+    SerialCtx defaultSerialCtx{NULL, 0, 0, false};
+
+    void* serialReadCtx = &defaultSerialCtx;
+    void* serialWriteCtx = &defaultSerialCtx;
+    bool (*serialReadFunction)(char* buffer, void* ctx) = defaultSerialReadFunction;
+    void (*serialWriteFunction)(const char* buffer, uint16_t length, void* ctx) = defaultSerialWriteFunction;
+
+    # if !USE_EXTERNALL_INPUT_REGISTER_BUFFER
+        uint16_t inputRegisters[INPUT_REGISTER_NUM] = {0};
+    # else
+        uint16_t* inputRegisters = NULL;
+    # endif
+
+
+    void(*readInputRegistersEvent) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
+    void* readInputRegistersEventCtx = NULL;
+    
+    # if !USE_EXTERNALL_HOLDING_REGISTER_BUFFER
+        uint16_t holdingRegisters[HOLDING_REGISTER_NUM] = {0};
+    # else
+        uint16_t* holdingRegisters = NULL;
+    # endif
+
+    void(*readHoldingRegistersEvent) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
+    void* readHoldingRegistersEventCtx = NULL;
+    void(*writeHoldingRegisterEvent) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
+    void* writeHoldingRegisterEventCtx = NULL;
+
+
+    public:
+    /**
+     * @brief Sets custom serial port context to be used for communication
+     * Configuration and initialization of this port must be done in user code
+     * 
+     */
+    void setCustomSerialPort(void* customSerial){defaultSerialCtx.serial = customSerial;}
+
+    /**
+     * @brief Sets custom serial read function
+     * This function must accept two parameters: pointer to buffer, where data will be stored
+     * and pointer to context (serial port object, or any other user-defined data)
+     * Function must return true if data was read successfully, false otherwise
+     * @param readFunction Function pointer to custom read function
+     * @param readCtx User-defined context, which will be passed to read function
+     */
+    void setSerialReadFunction(bool (*readFunction)(char* buffer, void* ctx), void* readCtx){
+        serialReadFunction = readFunction;
+        serialReadCtx = readCtx;
+    }
+
+    /**
+     * @brief Sets custom serial write function
+     * This function must accept three parameters: pointer to buffer, which holds data to be sent,
+     * length of data to be sent and pointer to context (serial port object, or any other user-defined data)
+     * @param writeFunction Function pointer to custom write function
+     * @param writeCtx User-defined context, which will be passed to write function
+     */
+    void setSerialWriteFunction(void (*writeFunction)(const char* buffer, uint16_t length,  void* ctx), void* writeCtx){
+        serialWriteFunction = writeFunction;
+        serialWriteCtx = writeCtx;
+    }
+
+    /**
+     * @brief Sets custom serial read function
+     * This function must accept two parameters: pointer to buffer, where data will be stored
+     * and pointer to context (serial port object, or any other user-defined data)
+     */
+
+    /**
+     * @brief Sets custom buffer for input registers
+     * @param inputs Input registers
+     */
+    #if USE_EXTERNALL_INPUT_REGISTER_BUFFER
+        void setInputRegistersBuffer(uint16_t* inputs){inputRegisters = inputs;}
+    #endif
+
+    /**
+     * @brief Sets event, which will be called when input registers are read (right before response is sent)
+     * @param event Function pointer to event handler
+     * @param ctx User-defined context, which will be passed to event handler
+     */
+    void setReadInputRegistersEvent(void(*event) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
+        readInputRegistersEvent = event; readInputRegistersEventCtx = ctx;}
+
+
+    /**
+     * @brief Sets custom buffer for input registers
+     * @param inputs Input registers
+     * @param size Length of buffer
+     */
+    #if USE_EXTERNALL_HOLDING_REGISTER_BUFFER
+        void setHoldingRegistersBuffer(uint16_t* holding){holdingRegisters = holding;}
+    #endif
+
+    /**
+     * @brief Sets event, which will be called when holding registers are read (right before response is sent)
+     * @param event Function pointer to event handler
+     * @param ctx User-defined context, which will be passed to event handler
+     */
+    void setReadHoldingRegistersEvent(void(*event) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
+        readHoldingRegistersEvent = event; readHoldingRegistersEventCtx = ctx;}
+
+    /**
+     * @brief Sets event, which will be called when holding register is written (right before data are written)
+     * @param event Function pointer to event handler
+     * @param ctx User-defined context, which will be passed to event handler
+     */
+    void setWriteHoldingRegisterEvent(void(*event) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
+        writeHoldingRegisterEvent = event; writeHoldingRegisterEventCtx = ctx;}
+
+
+    /**
+     * @brief Sets ModbusRTU communication parameters
+     * 
+     * @param address Device Modbus address
+     * @param baudRate Communication baud rate (set to 0 to disable serial port initialization)
+     * @param inputRegistersNum Number of input registers (if no buffer was provided, it will be allocated now)
+     * @param holdingRegistersNum Number of holding registers (if no buffer was provided, it will be allocated now)
+     */
+    void startModbusServer(uint16_t address, unsigned long baudRate);
+
+    /**
+     * @brief Main loop for communication.
+     * @return New command, -1 if none has arrived
+     */
+    int16_t communicationLoop();
+
+    /**
+     * @brief Saves data to input registers buffer
+     * 
+     * @param data Data to be saved
+     * @param length Length of data
+     * @param startAddress Start address in input registers buffer
+     */
+    void copyToInputRegisters(uint16_t* data, uint16_t length, uint16_t startAddress);
+
+    /**
+     * @brief Saves data to holding registers buffer
+     * 
+     * @param data Data to be saved
+     * @param length Length of data
+     * @param startAddress Start address in holding registers buffer
+     */
+    void copyToHoldingRegisters(uint16_t* data, uint16_t length, uint16_t startAddress);
+
+    /**
+     * @brief Reads data from holding registers buffer
+     * 
+     * @param data Buffer where data will be stored
+     * @param length Length of data to be read
+     * @param startAddress Start address in holding registers buffer
+     */
+    void copyFromHoldingRegisters(uint16_t* data, uint16_t length, uint16_t startAddress);
+
+    private:
+    bool calculateCRC(volatile uint8_t* data, uint16_t length, bool append_crc);
+    void sendResponse(volatile uint8_t* packet_data, uint16_t length);
+    void sendErrorResponse(volatile request_packet* packet, uint8_t error_code);
+    void readRegistersHandler(volatile request_packet* packet);
+    int16_t writeRegisterHandler(volatile request_packet* packet);
+    int16_t handleRequest(request_packet* packet);
+    
+};
 
 
 
