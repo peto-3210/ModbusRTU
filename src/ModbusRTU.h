@@ -9,8 +9,9 @@ like DMA reading, etc. Protocol data, such as are transmitted in big endian.
 //Adjust if necessary
 #define INPUT_REGISTER_NUM 100
 #define HOLDING_REGISTER_NUM 100
-#define USE_EXTERNALL_INPUT_REGISTER_BUFFER false
-#define USE_EXTERNALL_HOLDING_REGISTER_BUFFER false
+#define USE_EXTERNAL_INPUT_REGISTER_BUFFER false
+#define USE_EXTERNAL_HOLDING_REGISTER_BUFFER false
+#define USE_CUSTOM_READ_WRITE_FUNCTIONS false
 
 
 //ModbusRTU defines (do not change)
@@ -38,7 +39,9 @@ like DMA reading, etc. Protocol data, such as are transmitted in big endian.
 //Used to swap endianity
 #define endianity_swap_16bit(value) ((uint16_t)(((value) & 0xff) << 8) | (((value) & 0xff00) >> 8))
 
-//Packet struct
+/**
+ * @brief Structure for received modbus packet
+ */
 typedef union {
     uint8_t raw_data[MODBUS_REQUEST_BASE_LENGTH + CRC_LEN + 1];
     struct {
@@ -54,12 +57,21 @@ typedef union {
     };
 } request_packet; 
 
-typedef struct {
-    void* serial;
-    unsigned long timeout;
-    unsigned long lastTimestamp;
-    bool newDataDetected;
-} SerialCtx;
+
+#if !USE_CUSTOM_READ_WRITE_FUNCTIONS
+    /**
+     * @brief Default context structure for read and write function
+     */
+    typedef struct {
+        HardwareSerial* serial;
+        unsigned long timeout;
+        unsigned long lastTimestamp;
+        bool newDataDetected;
+    } SerialCtx;
+
+    extern bool defaultSerialReadFunction(char* buffer, SerialCtx* ctx);
+    extern void defaultSerialWriteFunction(const char* buffer, uint16_t length, SerialCtx* ctx);
+#endif
 
 
 //CRC table
@@ -97,39 +109,42 @@ static const uint16_t crc_table[256] = {
 	0x4400, 0x84C1, 0x8581, 0x4540, 0x8701, 0x47C0, 0x4680, 0x8641,
 	0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040 };
 
-extern bool defaultSerialReadFunction(char* buffer, void* ctx);
-extern void defaultSerialWriteFunction(const char* buffer, uint16_t length, void* ctx);
-
 class ModbusRTU{
 
     private:
     uint16_t deviceAddress;
 
-    unsigned long timeout = 0; //Milliseconds
+    unsigned long timeout = 0; //Microseconds
     unsigned long lastTimestamp = 0;
+
+    #if !USE_CUSTOM_READ_WRITE_FUNCTIONS
     SerialCtx defaultSerialCtx{NULL, 0, 0, false};
+    SerialCtx* serialReadCtx = &defaultSerialCtx;
+    SerialCtx* serialWriteCtx = &defaultSerialCtx;
+    bool (*serialReadFunction)(char* buffer, SerialCtx* ctx) = defaultSerialReadFunction;
+    void (*serialWriteFunction)(const char* buffer, uint16_t length, SerialCtx* ctx) = defaultSerialWriteFunction;
 
-    void* serialReadCtx = &defaultSerialCtx;
-    void* serialWriteCtx = &defaultSerialCtx;
-    bool (*serialReadFunction)(char* buffer, void* ctx) = defaultSerialReadFunction;
-    void (*serialWriteFunction)(const char* buffer, uint16_t length, void* ctx) = defaultSerialWriteFunction;
+    #else
+    void* serialReadCtx = NULL;
+    void* serialWriteCtx = NULL;
+    bool (*serialReadFunction)(char* buffer, void* ctx) = NULL;
+    void (*serialWriteFunction)(const char* buffer, uint16_t length, void* ctx) = NULL;
+    #endif
 
-    # if !USE_EXTERNALL_INPUT_REGISTER_BUFFER
-        uint16_t inputRegisters[INPUT_REGISTER_NUM] = {0};
-    # else
-        uint16_t* inputRegisters = NULL;
-    # endif
+    #if !USE_EXTERNAL_INPUT_REGISTER_BUFFER
+    uint16_t inputRegisters[INPUT_REGISTER_NUM] = {0};
+    #else
+    uint16_t* inputRegisters = NULL;
+    #endif
 
+    #if !USE_EXTERNAL_HOLDING_REGISTER_BUFFER
+    uint16_t holdingRegisters[HOLDING_REGISTER_NUM] = {0};
+    #else
+    uint16_t* holdingRegisters = NULL;
+    #endif
 
     void(*readInputRegistersEvent) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
     void* readInputRegistersEventCtx = NULL;
-    
-    # if !USE_EXTERNALL_HOLDING_REGISTER_BUFFER
-        uint16_t holdingRegisters[HOLDING_REGISTER_NUM] = {0};
-    # else
-        uint16_t* holdingRegisters = NULL;
-    # endif
-
     void(*readHoldingRegistersEvent) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
     void* readHoldingRegistersEventCtx = NULL;
     void(*writeHoldingRegisterEvent) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
@@ -137,13 +152,8 @@ class ModbusRTU{
 
 
     public:
-    /**
-     * @brief Sets custom serial port context to be used for communication
-     * Configuration and initialization of this port must be done in user code
-     * 
-     */
-    void setCustomSerialPort(void* customSerial){defaultSerialCtx.serial = customSerial;}
 
+    #if USE_CUSTOM_READ_WRITE_FUNCTIONS
     /**
      * @brief Sets custom serial read function
      * This function must accept two parameters: pointer to buffer, where data will be stored
@@ -168,19 +178,23 @@ class ModbusRTU{
         serialWriteFunction = writeFunction;
         serialWriteCtx = writeCtx;
     }
+    #endif
 
-    /**
-     * @brief Sets custom serial read function
-     * This function must accept two parameters: pointer to buffer, where data will be stored
-     * and pointer to context (serial port object, or any other user-defined data)
-     */
-
+    #if USE_EXTERNAL_INPUT_REGISTER_BUFFER
     /**
      * @brief Sets custom buffer for input registers
      * @param inputs Input registers
      */
-    #if USE_EXTERNALL_INPUT_REGISTER_BUFFER
-        void setInputRegistersBuffer(uint16_t* inputs){inputRegisters = inputs;}
+    void setInputRegistersBuffer(uint16_t* inputs){inputRegisters = inputs;}
+    #endif
+
+    #if USE_EXTERNAL_HOLDING_REGISTER_BUFFER    
+    /**
+     * @brief Sets custom buffer for input registers
+     * @param inputs Input registers
+     * @param size Length of buffer
+     */
+        void setHoldingRegistersBuffer(uint16_t* holding){holdingRegisters = holding;}
     #endif
 
     /**
@@ -190,16 +204,6 @@ class ModbusRTU{
      */
     void setReadInputRegistersEvent(void(*event) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
         readInputRegistersEvent = event; readInputRegistersEventCtx = ctx;}
-
-
-    /**
-     * @brief Sets custom buffer for input registers
-     * @param inputs Input registers
-     * @param size Length of buffer
-     */
-    #if USE_EXTERNALL_HOLDING_REGISTER_BUFFER
-        void setHoldingRegistersBuffer(uint16_t* holding){holdingRegisters = holding;}
-    #endif
 
     /**
      * @brief Sets event, which will be called when holding registers are read (right before response is sent)
@@ -219,20 +223,19 @@ class ModbusRTU{
 
 
     /**
-     * @brief Sets ModbusRTU communication parameters
+     * @brief Sets ModbusRTU communication parameters. If no serial port has been
+     * specified, used default one and calls Serial.begin()
      * 
      * @param address Device Modbus address
-     * @param baudRate Communication baud rate (set to 0 to disable serial port initialization)
-     * @param inputRegistersNum Number of input registers (if no buffer was provided, it will be allocated now)
-     * @param holdingRegistersNum Number of holding registers (if no buffer was provided, it will be allocated now)
+     * @param baudRate Communication baud rate
      */
-    void startModbusServer(uint16_t address, unsigned long baudRate);
+    void startModbusServer(uint16_t address, unsigned long baudRate, HardwareSerial& serialPort = Serial, bool initialize = true);
 
     /**
      * @brief Main loop for communication.
-     * @return New command, -1 if none has arrived
+     * @return Address of affected register, -1 if none has arrived
      */
-    int16_t communicationLoop();
+    int communicationLoop();
 
     /**
      * @brief Saves data to input registers buffer
@@ -261,13 +264,40 @@ class ModbusRTU{
      */
     void copyFromHoldingRegisters(uint16_t* data, uint16_t length, uint16_t startAddress);
 
+    /**
+     * @brief Sets single value in input registers buffer
+     * @param address Address of register
+     * @param value Value to be set
+     */
+    void setInputValue(uint16_t address, uint16_t value){
+        if (address < INPUT_REGISTER_NUM) inputRegisters[address] = value;
+    }
+
+    /**
+     * @brief Sets single value in holding registers buffer
+     * @param address Address of register
+     * @param value Value to be set
+     */
+    void setHoldingValue(uint16_t address, uint16_t value){
+        if (address < HOLDING_REGISTER_NUM) holdingRegisters[address] = value;
+    }
+
+    /**
+     * @brief Gets single value from input registers buffer
+     * @param address Address of register
+     */
+    uint16_t getHoldingValue(uint16_t address){
+        if (address < HOLDING_REGISTER_NUM) return holdingRegisters[address];
+        return 0;
+    }
+
     private:
     bool calculateCRC(volatile uint8_t* data, uint16_t length, bool append_crc);
     void sendResponse(volatile uint8_t* packet_data, uint16_t length);
     void sendErrorResponse(volatile request_packet* packet, uint8_t error_code);
     void readRegistersHandler(volatile request_packet* packet);
-    int16_t writeRegisterHandler(volatile request_packet* packet);
-    int16_t handleRequest(request_packet* packet);
+    bool writeRegisterHandler(volatile request_packet* packet);
+    bool handleRequest(request_packet* packet);
     
 };
 

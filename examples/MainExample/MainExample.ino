@@ -15,8 +15,8 @@ void setup(){
 }
 
 void loop(){
-    int16_t newData = modbus.communicationLoop();
-    if (newData != -1){
+    bool newData = modbus.communicationLoop();
+    if (newData != false){
         //New data arrived
         digitalWrite(LED_BUILTIN, previous);
         previous = !previous;

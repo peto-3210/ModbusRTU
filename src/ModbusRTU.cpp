@@ -117,38 +117,36 @@ void ModbusRTU::readRegistersHandler(volatile request_packet* packet){
  * @brief Handles Write_Single_Register request and sends response.
  * 
  * @param packet Modbus packet
- * @return int16_t Written value, -1 if error occured
+ * @return True if request was successfully handled, false otherwise
  */
-int16_t ModbusRTU::writeRegisterHandler(volatile request_packet* packet){
+bool ModbusRTU::writeRegisterHandler(volatile request_packet* packet){
     packet->first_register = endianity_swap_16bit(packet->first_register);
     packet->single_register_data = endianity_swap_16bit(packet->single_register_data);
 
     if (packet->first_register + 1 > HOLDING_REGISTER_NUM){
         sendErrorResponse(packet, EX_ILLEGAL_ADDRESS);
-        return -1;
+        return false;
     }
 
     if (writeHoldingRegisterEvent != NULL){
         writeHoldingRegisterEvent((uint8_t*)packet, MODBUS_REQUEST_BASE_LENGTH, writeHoldingRegisterEventCtx);
     }
-    int16_t value = holdingRegisters[packet->first_register] = packet->single_register_data;
+    holdingRegisters[packet->first_register] = packet->single_register_data;
 
     packet->first_register = endianity_swap_16bit(packet->first_register);
     packet->single_register_data = endianity_swap_16bit(packet->single_register_data);
     sendResponse(packet->raw_data, MODBUS_REQUEST_BASE_LENGTH);
 
-    return value;
+    return true;
 }
 
 /**
  * @brief Handles incoming Modbus request
  * 
  * @param packet Modbus packet
- * @return int16_t Return value depends on request type:
- * For Read Registers -1
- * For Write Single Register - written value
+ * @return True in case of write request (new data), false otherwise
  */
-int16_t ModbusRTU::handleRequest(request_packet* packet){
+bool ModbusRTU::handleRequest(request_packet* packet){
     int16_t returnValue = -1;
     
     switch (packet->function_code){
@@ -165,27 +163,29 @@ int16_t ModbusRTU::handleRequest(request_packet* packet){
     return returnValue;
 }
 
-void ModbusRTU::startModbusServer(uint16_t address, unsigned long baudRate){
+void ModbusRTU::startModbusServer(uint16_t address, unsigned long baudRate, HardwareSerial& serialPort, bool initialize){
         this->deviceAddress = address;
-        if (defaultSerialCtx.serial == NULL){
+
+    #if !USE_CUSTOM_READ_WRITE_FUNCTIONS
             defaultSerialCtx.serial = &Serial;
-            Serial.begin(baudRate, SERIAL_8E1);
-        }
-        //Calculate timeout based on baud rate in microseconds
-        defaultSerialCtx.timeout = ((int)ceil(1000000 / baudRate)) * MODBUS_REQUEST_BASE_LENGTH * (1 + 8 + 1 + 1); //1 start bit + 8 data bits + parity + 1 stop bit
-        defaultSerialCtx.lastTimestamp = micros();
+            if (initialize == true){
+                Serial.begin(baudRate, SERIAL_8E1);
+            }
+            //Calculate timeout based on baud rate in microseconds
+            defaultSerialCtx.timeout = ((int)ceil(1000000 / baudRate)) * MODBUS_REQUEST_BASE_LENGTH * (1 + 8 + 1 + 1); //1 start bit + 8 data bits + parity + 1 stop bit
+    #endif
     }
 
 /**
  * @brief Main communication loop. Call this function periodically.
  * 
- * @return int16_t New data, -1 if none has arrived
+ * @return True if new data arrived (write request), false otherwise)
  */
-int16_t ModbusRTU::communicationLoop(){
+int ModbusRTU::communicationLoop(){
     
     request_packet received_packet = {0};
     if (serialReadFunction((char*)received_packet.raw_data, serialReadCtx) == false){
-        return -1;
+        return false;
     }
 
     if (received_packet.address == deviceAddress &&
@@ -193,83 +193,84 @@ int16_t ModbusRTU::communicationLoop(){
 
         return handleRequest(&received_packet);
     }
-    return -1;
+    return false;
 }
 
 void ModbusRTU::copyToInputRegisters(uint16_t* data, uint16_t length, uint16_t startAddress){
-        if (startAddress + length <= INPUT_REGISTER_NUM){
-            for (uint16_t i = 0; i < length; i++){
-                inputRegisters[startAddress + i] = data[i];
-            }
+    if (startAddress + length <= INPUT_REGISTER_NUM){
+        for (uint16_t i = 0; i < length; i++){
+            inputRegisters[startAddress + i] = data[i];
         }
     }
+}
 
 void ModbusRTU::copyToHoldingRegisters(uint16_t* data, uint16_t length, uint16_t startAddress){
-        if (startAddress + length <= HOLDING_REGISTER_NUM){
-            for (uint16_t i = 0; i < length; i++){
-                holdingRegisters[startAddress + i] = data[i];
-            }
+    if (startAddress + length <= HOLDING_REGISTER_NUM){
+        for (uint16_t i = 0; i < length; i++){
+            holdingRegisters[startAddress + i] = data[i];
         }
     }
+}
 
 void ModbusRTU::copyFromHoldingRegisters(uint16_t* data, uint16_t length, uint16_t startAddress){
-        if (startAddress + length <= HOLDING_REGISTER_NUM){
-            for (uint16_t i = 0; i < length; i++){
-                data[i] = holdingRegisters[startAddress + i];
-            }
+    if (startAddress + length <= HOLDING_REGISTER_NUM){
+        for (uint16_t i = 0; i < length; i++){
+            data[i] = holdingRegisters[startAddress + i];
         }
     }
+}
 
-/**
- * @brief Default serial read function
- * @param buffer Buffer where data will be stored
- * @param ctx Serial port context
- * @return true If data was read successfully, false otherwise
- */
-bool defaultSerialReadFunction(char* buffer, void* ctx){
-    SerialCtx* currentCtx = (SerialCtx*)ctx;
-    HardwareSerial* serialPort = (HardwareSerial*)currentCtx->serial;
 
-    if (serialPort->available() == MODBUS_REQUEST_BASE_LENGTH + CRC_LEN){
-        serialPort->readBytes(buffer, MODBUS_REQUEST_BASE_LENGTH + CRC_LEN);
-        //digitalWrite(7, toggle2);
-        currentCtx->lastTimestamp = micros();
-        currentCtx->newDataDetected = false;
-        return true;
-    }
+#if !USE_CUSTOM_READ_WRITE_FUNCTIONS
+    /**
+     * @brief Default serial read function
+     * @param buffer Buffer where data will be stored
+     * @param ctx Serial port context
+     * @return true If data was read successfully, false otherwise
+     */
+    bool defaultSerialReadFunction(char* buffer, SerialCtx* currentCtx){
+        HardwareSerial* serialPort = currentCtx->serial;
 
-    if (serialPort->available() == 0){
+        if (serialPort->available() == MODBUS_REQUEST_BASE_LENGTH + CRC_LEN){
+            serialPort->readBytes(buffer, MODBUS_REQUEST_BASE_LENGTH + CRC_LEN);
+            //digitalWrite(7, toggle2);
+            currentCtx->lastTimestamp = micros();
+            currentCtx->newDataDetected = false;
+            return true;
+        }
+
+        if (serialPort->available() == 0){
+            currentCtx->lastTimestamp = micros();
+            return false;
+        }
+
+        unsigned long long currentTimestamp = micros();
+        if (currentTimestamp < currentCtx->lastTimestamp){
+            //Overflow occurred
+            currentTimestamp += UINT32_MAX;
+        }
+
+        //If buffer is not empty and timeout has passed, clear buffer
+        if (currentCtx->newDataDetected == true && 
+            currentTimestamp - currentCtx->lastTimestamp >= currentCtx->timeout){
+            while(serialPort->read() != -1); //Clear buffer
+            currentCtx->newDataDetected = false;
+        }
+        else {
+            currentCtx->newDataDetected = true;
+        }
+
         currentCtx->lastTimestamp = micros();
         return false;
     }
 
-    unsigned long long currentTimestamp = micros();
-    if (currentTimestamp < currentCtx->lastTimestamp){
-        //Overflow occurred
-        currentTimestamp += UINT32_MAX;
+    /**
+     * @brief Default serial write function
+     * @param buffer Buffer which holds data to be sent
+     * @param length Length of data to be sent
+     * @param currentCtx Serial port context
+     */
+    void defaultSerialWriteFunction(const char* buffer, uint16_t length, SerialCtx* currentCtx){
+        currentCtx->serial->write((const uint8_t*)buffer, length);
     }
-
-    //If buffer is not empty and timeout has passed, clear buffer
-    if (currentCtx->newDataDetected == true && 
-        currentTimestamp - currentCtx->lastTimestamp >= currentCtx->timeout){
-        while(serialPort->read() != -1); //Clear buffer
-        currentCtx->newDataDetected = false;
-    }
-    else {
-        currentCtx->newDataDetected = true;
-    }
-
-    currentCtx->lastTimestamp = micros();
-    return false;
-}
-
-/**
- * @brief Default serial write function
- * @param buffer Buffer which holds data to be sent
- * @param length Length of data to be sent
- * @param ctx Serial port context
- */
-void defaultSerialWriteFunction(const char* buffer, uint16_t length, void* ctx){
-    HardwareSerial* serialPort = (HardwareSerial*)((SerialCtx*)ctx)->serial;
-    serialPort->write((const uint8_t*)buffer, length);
-}
+#endif
