@@ -101,7 +101,7 @@ void ModbusRTU::readRegistersHandler(volatile requestPacket* packet){
         #if USE_FIXED_RESPONSE_BUFFER_SIZE
             uint8_t mb_response[RESPONSE_BUFFER_SIZE] = {0};
         #else
-            uint8_t mb_response[READ_RESPONSE_BASE_LEN + (packet->register_count * 2) + CRC_LEN] = {0};
+            uint8_t mb_response[bufferSize] = {0};
         #endif
 
         mb_response[0] = packet->address;
