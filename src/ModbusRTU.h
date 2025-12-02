@@ -3,7 +3,7 @@
 /*Modbus is implemented as non-inverted UART with even parity and 1 stop bit (according to standard). 
 Only ReadInputRegisters, ReadHoldingRegisters and WriteSingleRegister functions are implemented, so the
 standard request packet should consist of 6 bytes + CRC (2 bytes). This can be utilized in various cases,
-like DMA reading, etc. Protocol data, such as are transmitted in big endian.
+like DMA reading, etc. Protocol data, such as register content, are transmitted in big endian.
 */
 
 //Adjust if necessary
@@ -12,12 +12,19 @@ like DMA reading, etc. Protocol data, such as are transmitted in big endian.
 #define USE_EXTERNAL_INPUT_REGISTER_BUFFER false
 #define USE_EXTERNAL_HOLDING_REGISTER_BUFFER false
 #define USE_CUSTOM_READ_WRITE_FUNCTIONS false
+#define USE_FIXED_RESPONSE_BUFFER_SIZE false
+#define RESPONSE_BUFFER_SIZE 256
+
 
 
 //ModbusRTU defines (do not change)
 #define MODBUS_REQUEST_BASE_LENGTH 6
-#define MODBUS_RESPONSE_BASE_LEN 3
+#define READ_RESPONSE_BASE_LEN 3
 #define CRC_LEN 2
+
+#if USE_FIXED_RESPONSE_BUFFER_SIZE && RESPONSE_BUFFER_SIZE < 8
+    #error "RESPONSE_BUFFER_SIZE must be at least 8 bytes!"
+#endif
 
 #define FC_READ_HOLDING_REGISTERS 3
 #define FC_READ_INPUT_REGISTERS 4
@@ -55,7 +62,7 @@ typedef union {
         //Last register will hold CRC data
         uint16_t crc;
     };
-} request_packet; 
+} requestPacket; 
 
 
 #if !USE_CUSTOM_READ_WRITE_FUNCTIONS
@@ -223,19 +230,20 @@ class ModbusRTU{
 
 
     /**
-     * @brief Sets ModbusRTU communication parameters. If no serial port has been
-     * specified, used default one and calls Serial.begin()
+     * @brief Sets ModbusRTU communication parameters. 
      * 
      * @param address Device Modbus address
      * @param baudRate Communication baud rate
+     * @param serialPort HardwareSerial port to be used (default: Serial)
+     * @param initialize If true, serial port will be initialized in this function (default: true)
      */
     void startModbusServer(uint16_t address, unsigned long baudRate, HardwareSerial& serialPort = Serial, bool initialize = true);
 
     /**
-     * @brief Main loop for communication.
-     * @return Address of affected register, -1 if none has arrived
+     * @brief Main communication loop. Call this function periodically.
+     * @return True if new data arrived (write request), false otherwise
      */
-    int communicationLoop();
+    bool communicationLoop();
 
     /**
      * @brief Saves data to input registers buffer
@@ -294,10 +302,10 @@ class ModbusRTU{
     private:
     bool calculateCRC(volatile uint8_t* data, uint16_t length, bool append_crc);
     void sendResponse(volatile uint8_t* packet_data, uint16_t length);
-    void sendErrorResponse(volatile request_packet* packet, uint8_t error_code);
-    void readRegistersHandler(volatile request_packet* packet);
-    bool writeRegisterHandler(volatile request_packet* packet);
-    bool handleRequest(request_packet* packet);
+    void sendErrorResponse(volatile requestPacket* packet, uint8_t error_code);
+    void readRegistersHandler(volatile requestPacket* packet);
+    bool writeRegisterHandler(volatile requestPacket* packet);
+    bool handleRequest(requestPacket* packet);
     
 };
 

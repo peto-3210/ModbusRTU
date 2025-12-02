@@ -52,9 +52,9 @@ void ModbusRTU::sendResponse(volatile uint8_t* packet_data, uint16_t length){
  * @param packet Modbus packet
  * @param error_code Code of exception
  */
-void ModbusRTU::sendErrorResponse(volatile request_packet* packet, uint8_t error_code){
-    uint8_t mb_response[MODBUS_RESPONSE_BASE_LEN + CRC_LEN] = {packet->address, (uint8_t)(packet->function_code | 0b10000000), error_code};
-    sendResponse(mb_response, MODBUS_RESPONSE_BASE_LEN);
+void ModbusRTU::sendErrorResponse(volatile requestPacket* packet, uint8_t error_code){
+    uint8_t mb_response[READ_RESPONSE_BASE_LEN + CRC_LEN] = {packet->address, (uint8_t)(packet->function_code | 0b10000000), error_code};
+    sendResponse(mb_response, READ_RESPONSE_BASE_LEN);
 }
 
 
@@ -64,7 +64,7 @@ void ModbusRTU::sendErrorResponse(volatile request_packet* packet, uint8_t error
  * @brief Handles Read Registers request and sends response
  * @param packet Modbus packet
  */
-void ModbusRTU::readRegistersHandler(volatile request_packet* packet){
+void ModbusRTU::readRegistersHandler(volatile requestPacket* packet){
     packet->first_register = endianity_swap_16bit(packet->first_register);
     packet->register_count = endianity_swap_16bit(packet->register_count);
 
@@ -86,30 +86,37 @@ void ModbusRTU::readRegistersHandler(volatile request_packet* packet){
         eventCtx = readHoldingRegistersEventCtx;
     }
 
+    int bufferSize = READ_RESPONSE_BASE_LEN + (packet->register_count * 2) + CRC_LEN;
 
     if (packet->first_register + packet->register_count > registerNum || 
         packet->register_count > MAX_READ_REGISTER_COUNT){
         sendErrorResponse(packet, EX_ILLEGAL_ADDRESS);
     }
 
-    uint8_t mb_response[MODBUS_RESPONSE_BASE_LEN + (packet->register_count * 2) + CRC_LEN] = {0};
-    mb_response[0] = packet->address;
-    mb_response[1] = packet->function_code;
-    mb_response[2] = packet->register_count * 2; //Number of bytes to follow
-    //Serial.print(inputRegisters[0], 10);
-    //Serial.flush();
-    //delay(10);
-
-    for (uint16_t i = 0; i < packet->register_count; ++i){
-        put_16bit_into_byte_buffer(mb_response, MODBUS_RESPONSE_BASE_LEN + (2 * i), endianity_swap_16bit(registers[packet->first_register + i]));
+    else if (USE_FIXED_RESPONSE_BUFFER_SIZE && bufferSize > RESPONSE_BUFFER_SIZE){
+        sendErrorResponse(packet, EX_ILLEGAL_ADDRESS);
     }
 
+    else {
+        #if USE_FIXED_RESPONSE_BUFFER_SIZE
+            uint8_t mb_response[RESPONSE_BUFFER_SIZE] = {0};
+        #else
+            uint8_t mb_response[READ_RESPONSE_BASE_LEN + (packet->register_count * 2) + CRC_LEN] = {0};
+        #endif
 
-    if (event != NULL){
-        event(mb_response, MODBUS_RESPONSE_BASE_LEN + (packet->register_count * 2), eventCtx);
+        mb_response[0] = packet->address;
+        mb_response[1] = packet->function_code;
+        mb_response[2] = packet->register_count * 2; //Number of bytes to follow
+
+        for (uint16_t i = 0; i < packet->register_count; ++i){
+            put_16bit_into_byte_buffer(mb_response, READ_RESPONSE_BASE_LEN + (2 * i), endianity_swap_16bit(registers[packet->first_register + i]));
+        }
+
+        if (event != NULL){
+            event(mb_response, READ_RESPONSE_BASE_LEN + (packet->register_count * 2), eventCtx);
+        }
+        sendResponse(mb_response, READ_RESPONSE_BASE_LEN + (packet->register_count * 2));
     }
-
-    sendResponse(mb_response, MODBUS_RESPONSE_BASE_LEN + (packet->register_count * 2));
 }
     
 
@@ -119,7 +126,7 @@ void ModbusRTU::readRegistersHandler(volatile request_packet* packet){
  * @param packet Modbus packet
  * @return True if request was successfully handled, false otherwise
  */
-bool ModbusRTU::writeRegisterHandler(volatile request_packet* packet){
+bool ModbusRTU::writeRegisterHandler(volatile requestPacket* packet){
     packet->first_register = endianity_swap_16bit(packet->first_register);
     packet->single_register_data = endianity_swap_16bit(packet->single_register_data);
 
@@ -146,8 +153,8 @@ bool ModbusRTU::writeRegisterHandler(volatile request_packet* packet){
  * @param packet Modbus packet
  * @return True in case of write request (new data), false otherwise
  */
-bool ModbusRTU::handleRequest(request_packet* packet){
-    int16_t returnValue = -1;
+bool ModbusRTU::handleRequest(requestPacket* packet){
+    bool returnValue = false;
     
     switch (packet->function_code){
         case FC_READ_HOLDING_REGISTERS:
@@ -163,6 +170,22 @@ bool ModbusRTU::handleRequest(request_packet* packet){
     return returnValue;
 }
 
+
+bool ModbusRTU::communicationLoop(){
+    
+    requestPacket receivedPacket = {0};
+    if (serialReadFunction((char*)receivedPacket.raw_data, serialReadCtx) == false){
+        return false;
+    }
+
+    if (receivedPacket.address == deviceAddress &&
+        calculateCRC(receivedPacket.raw_data, MODBUS_REQUEST_BASE_LENGTH, false) == true){
+
+        return handleRequest(&receivedPacket);
+    }
+    return false;
+}
+
 void ModbusRTU::startModbusServer(uint16_t address, unsigned long baudRate, HardwareSerial& serialPort, bool initialize){
         this->deviceAddress = address;
 
@@ -174,26 +197,6 @@ void ModbusRTU::startModbusServer(uint16_t address, unsigned long baudRate, Hard
             //Calculate timeout based on baud rate in microseconds
             defaultSerialCtx.timeout = ((int)ceil(1000000 / baudRate)) * MODBUS_REQUEST_BASE_LENGTH * (1 + 8 + 1 + 1); //1 start bit + 8 data bits + parity + 1 stop bit
     #endif
-    }
-
-/**
- * @brief Main communication loop. Call this function periodically.
- * 
- * @return True if new data arrived (write request), false otherwise)
- */
-int ModbusRTU::communicationLoop(){
-    
-    request_packet received_packet = {0};
-    if (serialReadFunction((char*)received_packet.raw_data, serialReadCtx) == false){
-        return false;
-    }
-
-    if (received_packet.address == deviceAddress &&
-        calculateCRC(received_packet.raw_data, MODBUS_REQUEST_BASE_LENGTH, false) == true){
-
-        return handleRequest(&received_packet);
-    }
-    return false;
 }
 
 void ModbusRTU::copyToInputRegisters(uint16_t* data, uint16_t length, uint16_t startAddress){
