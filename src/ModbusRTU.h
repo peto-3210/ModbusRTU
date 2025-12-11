@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <ctype.h>
+#include <string.h>
 
 /*Modbus is implemented as non-inverted UART with even parity and 1 stop bit (according to standard). 
 Only ReadInputRegisters, ReadHoldingRegisters and WriteSingleRegister functions are implemented, so the
@@ -12,24 +14,26 @@ like DMA reading, etc. Protocol data, such as register content, are transmitted 
 #define USE_EXTERNAL_INPUT_REGISTER_BUFFER false
 #define USE_EXTERNAL_HOLDING_REGISTER_BUFFER false
 #define USE_CUSTOM_READ_WRITE_FUNCTIONS false
-#define USE_FIXED_RESPONSE_BUFFER_SIZE false
-#define RESPONSE_BUFFER_SIZE 256
+#define USE_FIXED_SCRATCH_BUFFER_SIZE false
+#define SCRATCH_BUFFER_SIZE 256
+#define GET_TIMESTAMP_US micros
 
 
 
 //ModbusRTU defines (do not change)
 #define MODBUS_REQUEST_BASE_LENGTH 6
-#define READ_RESPONSE_BASE_LEN 3
+#define MODBUS_RESPONSE_BASE_LENGTH 3
 #define CRC_LEN 2
 
-#if USE_FIXED_RESPONSE_BUFFER_SIZE && RESPONSE_BUFFER_SIZE < 8
-    #error "RESPONSE_BUFFER_SIZE must be at least 8 bytes!"
+
+#if USE_FIXED_SCRATCH_BUFFER_SIZE && SCRATCH_BUFFER_SIZE < 8
+    #error "SCRATCH_BUFFER_SIZE must be at least 8 bytes!"
 #endif
 
 #define FC_READ_HOLDING_REGISTERS 3
 #define FC_READ_INPUT_REGISTERS 4
 #define FC_WRITE_SINGLE_REGISTER 6
-//#define FC_WRITE_MULTIPLE_REGISTERS 16
+#define FC_WRITE_MULTIPLE_REGISTERS 16
 
 #define EX_ILLEGAL_FUNCTION 1
 #define EX_ILLEGAL_ADDRESS 2
@@ -71,13 +75,28 @@ typedef union {
      */
     typedef struct {
         HardwareSerial* serial;
-        unsigned long timeout;
-        unsigned long lastTimestamp;
-        bool newDataDetected;
+        uint32_t byteTransTime;
+        uint32_t transactionTimeout;
+        uint32_t responseTimeout;
+        bool acceptException; //If true, 5-bytes long transaction will be considered valid, for it may be Modbus exception response
+
+        /**
+         * @brief Sets transaction timeout according to number of expected bytes (excluding CRC)
+         */
+        void setTransTimeout(uint16_t byteNum){
+            transactionTimeout = byteTransTime * (byteNum + CRC_LEN + 5); //Add some extra time, just in case
+        }
+
+        /**
+         * @brief Sets timeout for response
+         */
+        void SetRespTimeout(uint32_t timeout){
+            responseTimeout = timeout;
+        }
     } SerialCtx;
 
-    extern bool defaultSerialReadFunction(char* buffer, SerialCtx* ctx);
-    extern void defaultSerialWriteFunction(const char* buffer, uint16_t length, SerialCtx* ctx);
+    extern uint8_t defaultSerialReadFunction(char* buffer, uint8_t length, SerialCtx* ctx);
+    extern void defaultSerialWriteFunction(const char* buffer, uint8_t length, SerialCtx* ctx);
 #endif
 
 
@@ -116,28 +135,87 @@ static const uint16_t crc_table[256] = {
 	0x4400, 0x84C1, 0x8581, 0x4540, 0x8701, 0x47C0, 0x4680, 0x8641,
 	0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040 };
 
+/**
+ * @brief Default class
+ */
 class ModbusRTU{
-
-    private:
-    uint16_t deviceAddress;
-
-    unsigned long timeout = 0; //Microseconds
-    unsigned long lastTimestamp = 0;
+    protected:
+    uint8_t deviceAddress;
 
     #if !USE_CUSTOM_READ_WRITE_FUNCTIONS
     SerialCtx defaultSerialCtx{NULL, 0, 0, false};
     SerialCtx* serialReadCtx = &defaultSerialCtx;
     SerialCtx* serialWriteCtx = &defaultSerialCtx;
-    bool (*serialReadFunction)(char* buffer, SerialCtx* ctx) = defaultSerialReadFunction;
-    void (*serialWriteFunction)(const char* buffer, uint16_t length, SerialCtx* ctx) = defaultSerialWriteFunction;
+    uint8_t (*serialReadFunction)(char* buffer, uint8_t length, SerialCtx* ctx) = defaultSerialReadFunction;
+    void (*serialWriteFunction)(const char* buffer, uint8_t length, SerialCtx* ctx) = defaultSerialWriteFunction;
 
     #else
     void* serialReadCtx = NULL;
     void* serialWriteCtx = NULL;
-    bool (*serialReadFunction)(char* buffer, void* ctx) = NULL;
+    int (*serialReadFunction)(char* buffer, uint16_t length, void* ctx) = NULL;
     void (*serialWriteFunction)(const char* buffer, uint16_t length, void* ctx) = NULL;
     #endif
 
+    protected:
+    ModbusRTU(){}
+    
+    #if USE_CUSTOM_READ_WRITE_FUNCTIONS
+    /**
+     * @brief Sets custom serial read function
+     * This function must accept two parameters: pointer to buffer, where data will be stored
+     * and pointer to context (serial port object, or any other user-defined data)
+     * Function must return number of read bytes if data was read successfully, -1 otherwise
+     * @param readFunction Function pointer to custom read function
+     * @param readCtx User-defined context, which will be passed to read function
+     */
+    void setSerialReadFunction(int (*readFunction)(char* buffer, uint16_t length, void* ctx), void* readCtx){
+        serialReadFunction = readFunction;
+        serialReadCtx = readCtx;
+    }
+
+    /**
+     * @brief Sets custom serial write function
+     * This function must accept three parameters: pointer to buffer, which holds data to be sent,
+     * length of data to be sent and pointer to context (serial port object, or any other user-defined data)
+     * @param writeFunction Function pointer to custom write function
+     * @param writeCtx User-defined context, which will be passed to write function
+     */
+    void setSerialWriteFunction(void (*writeFunction)(const char* buffer, uint16_t length,  void* ctx), void* writeCtx){
+        serialWriteFunction = writeFunction;
+        serialWriteCtx = writeCtx;
+    }
+
+    /**
+     * @brief Sets ModbusRTU communication parameters. 
+     * 
+     * @param address Device Modbus address
+     * */
+    void start(uint16_t address);
+
+    #else
+
+    /**
+     * @brief Sets ModbusRTU communication parameters. 
+     * 
+     * @param address Device Modbus address
+     * @param baudRate Communication baud rate
+     * @param serialPort HardwareSerial port to be used (default: Serial)
+     * @param initialize If true, serial port will be initialized in this function (default: true)
+     */
+    void start(uint16_t address, uint32_t baudRate, HardwareSerial& serialPort, bool initialize);
+    #endif
+
+    bool calculateCRC(volatile uint8_t* packetData, uint16_t length, bool append_crc);
+    void sendData(volatile uint8_t* packetData, uint8_t length);
+    uint8_t recvData(volatile uint8_t* data, uint8_t length);
+};
+
+/**
+ * @brief Class for ModbusRTU server
+ */
+class ModbusRTUServer: public ModbusRTU{
+
+    private:
     #if !USE_EXTERNAL_INPUT_REGISTER_BUFFER
     uint16_t inputRegisters[INPUT_REGISTER_NUM] = {0};
     #else
@@ -157,36 +235,13 @@ class ModbusRTU{
     void(*writeHoldingRegisterEvent) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
     void* writeHoldingRegisterEventCtx = NULL;
 
+    void sendErrorResponse(volatile requestPacket* packet, uint8_t error_code);
+    void readRegistersHandler(volatile requestPacket* packet);
+    bool writeRegisterHandler(volatile requestPacket* packet);
+    bool handleRequest(requestPacket* packet);
 
     public:
-
-    #if USE_CUSTOM_READ_WRITE_FUNCTIONS
-    /**
-     * @brief Sets custom serial read function
-     * This function must accept two parameters: pointer to buffer, where data will be stored
-     * and pointer to context (serial port object, or any other user-defined data)
-     * Function must return true if data was read successfully, false otherwise
-     * @param readFunction Function pointer to custom read function
-     * @param readCtx User-defined context, which will be passed to read function
-     */
-    void setSerialReadFunction(bool (*readFunction)(char* buffer, void* ctx), void* readCtx){
-        serialReadFunction = readFunction;
-        serialReadCtx = readCtx;
-    }
-
-    /**
-     * @brief Sets custom serial write function
-     * This function must accept three parameters: pointer to buffer, which holds data to be sent,
-     * length of data to be sent and pointer to context (serial port object, or any other user-defined data)
-     * @param writeFunction Function pointer to custom write function
-     * @param writeCtx User-defined context, which will be passed to write function
-     */
-    void setSerialWriteFunction(void (*writeFunction)(const char* buffer, uint16_t length,  void* ctx), void* writeCtx){
-        serialWriteFunction = writeFunction;
-        serialWriteCtx = writeCtx;
-    }
-    #endif
-
+    
     #if USE_EXTERNAL_INPUT_REGISTER_BUFFER
     /**
      * @brief Sets custom buffer for input registers
@@ -228,7 +283,7 @@ class ModbusRTU{
     void setWriteHoldingRegisterEvent(void(*event) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
         writeHoldingRegisterEvent = event; writeHoldingRegisterEventCtx = ctx;}
 
-
+    #if !USE_CUSTOM_READ_WRITE_FUNCTIONS
     /**
      * @brief Sets ModbusRTU communication parameters. 
      * 
@@ -236,8 +291,20 @@ class ModbusRTU{
      * @param baudRate Communication baud rate
      * @param serialPort HardwareSerial port to be used (default: Serial)
      * @param initialize If true, serial port will be initialized in this function (default: true)
+     * @note Function sets the length of expected bytes to MODBUS_REQUEST_BASE_LENGTH
      */
-    void startModbusServer(uint16_t address, unsigned long baudRate, HardwareSerial& serialPort = Serial, bool initialize = true);
+    void startModbusServer(uint16_t address, uint32_t baudRate, HardwareSerial& serialPort = Serial, bool initialize = true){
+        start(address, baudRate, serialPort, initialize);
+        defaultSerialCtx.setTransTimeout(MODBUS_REQUEST_BASE_LENGTH);    
+    }
+    #else
+    /**
+     * @brief Sets ModbusRTU communication parameters. 
+     * */
+    void startModbusServer(uint16_t address){
+        start(address);
+    }
+    #endif
 
     /**
      * @brief Main communication loop. Call this function periodically.
@@ -298,15 +365,85 @@ class ModbusRTU{
         if (address < HOLDING_REGISTER_NUM) return holdingRegisters[address];
         return 0;
     }
+};
+
+/**
+ * @brief Class for modbus client
+ */
+class ModbusRTUClient: public ModbusRTU{
 
     private:
-    bool calculateCRC(volatile uint8_t* data, uint16_t length, bool append_crc);
-    void sendResponse(volatile uint8_t* packet_data, uint16_t length);
-    void sendErrorResponse(volatile requestPacket* packet, uint8_t error_code);
-    void readRegistersHandler(volatile requestPacket* packet);
-    bool writeRegisterHandler(volatile requestPacket* packet);
-    bool handleRequest(requestPacket* packet);
+    int readRegisters(requestPacket* packet, uint16_t* responseBuffer, uint32_t timeout, bool allowException);
+    int writeRegisters(requestPacket* packet, uint16_t* registers, uint32_t timeout, bool allowException);
+
+    public:
     
+    #if !USE_CUSTOM_READ_WRITE_FUNCTIONS
+    /**
+     * @brief Sets ModbusRTU communication parameters. 
+     * 
+     * @param address Device Modbus address
+     * @param baudRate Communication baud rate
+     * @param serialPort HardwareSerial port to be used (default: Serial)
+     * @param initialize If true, serial port will be initialized in this function (default: true)
+     */
+    void startModbusClient(uint16_t address, uint32_t baudRate, HardwareSerial& serialPort = Serial, bool initialize = true){
+        start(address, baudRate, serialPort, initialize);
+        defaultSerialCtx.acceptException = true;
+    }
+
+    #else
+    /**
+     * @brief Sets ModbusRTU communication parameters. 
+     * */
+    void startModbusServer(uint16_t address){
+        start(address);
+    }
+    #endif
+
+    /**
+     * @brief Executes read input registers transaction
+     * @param firstRegister Address of the first register
+     * @param registerNum Number of registers
+     * @param registers Buffer where data will be stored
+     * @param timeout Transaction timeout (in microseconds)
+     * @param allowExceptions Whether treat exception as valid transaction
+     * @return 0 if response were successfully received, -1 otherwise, positive exception code in case of exception
+     */
+    int ReadInputRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout = 200000, bool allowException = false);
+
+    /**
+     * @brief Executes read holding registers transaction
+     * @param firstRegister Address of the first register
+     * @param registerNum Number of registers
+     * @param registers Buffer where data will be stored
+     * @param timeout Transaction timeout (in microseconds)
+     * @param allowExceptions Whether treat exception as valid transaction
+     * @return 0 if response were successfully received, -1 otherwise, positive exception code in case of exception
+     */
+    int ReadHoldingRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout = 200000, bool allowException = false);
+
+    /**
+     * @brief Executes write single register transaction
+     * @param firstRegister Address of the first register
+     * @param data Single register data
+     * @param timeout Transaction timeout (in microseconds)
+     * @param allowExceptions Whether treat exception as valid transaction
+     * @return 0 if response were successfully received, -1 otherwise, positive exception code in case of exception
+     */
+    int WriteSingleRegister(uint16_t firstRegister, uint16_t data, uint32_t timeout = 200000, bool allowException = false);
+
+    /**
+     * @brief Executes write multiple registers transaction
+     * @param firstRegister Address of the first register
+     * @param registerNum Number of registers
+     * @param registers Buffer with registers data
+     * @param timeout Transaction timeout (in microseconds)
+     * @param allowExceptions Whether treat exception as valid transaction
+     * @return 0 if response were successfully received, -1 otherwise, positive exception code in case of exception
+     */
+    int WriteMultipleRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout = 200000, bool allowException = false);
+
 };
 
 

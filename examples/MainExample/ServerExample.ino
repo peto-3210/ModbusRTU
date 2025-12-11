@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include "ModbusRTU.h"
 
-ModbusRTU modbus;
+ModbusRTUServer modbus;
 bool previous = false;
 
 void setup(){
@@ -10,8 +10,12 @@ void setup(){
     modbus.startModbusServer(1, 115200UL);
     for (uint16_t i = 0; i < 10; i++){
         modbus.copyToHoldingRegisters(&i, 1, i);
+        i += 10;
         modbus.copyToInputRegisters(&i, 1, i);
+        i -= 10;
     }
+    modbus.setInputValue(10, 10);
+    modbus.setHoldingValue(10, 20);
 }
 
 void loop(){
