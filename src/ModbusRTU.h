@@ -2,17 +2,10 @@
 #include <ctype.h>
 #include <string.h>
 
-/*Modbus is implemented as non-inverted UART with even parity and 1 stop bit (according to standard). 
-Only ReadInputRegisters, ReadHoldingRegisters and WriteSingleRegister functions are implemented, so the
-standard request packet should consist of 6 bytes + CRC (2 bytes). This can be utilized in various cases,
-like DMA reading, etc. Protocol data, such as register content, are transmitted in big endian.
-*/
-
 //Adjust if necessary
 #define INPUT_REGISTER_NUM 100
 #define HOLDING_REGISTER_NUM 100
-#define USE_EXTERNAL_INPUT_REGISTER_BUFFER false
-#define USE_EXTERNAL_HOLDING_REGISTER_BUFFER false
+#define USE_EXTERNAL_REGISTER_BUFFERS false
 #define USE_CUSTOM_READ_WRITE_FUNCTIONS false
 #define USE_FIXED_SCRATCH_BUFFER_SIZE false
 #define SCRATCH_BUFFER_SIZE 256
@@ -160,12 +153,16 @@ class ModbusRTU{
     ModbusRTU(){}
     
     #if USE_CUSTOM_READ_WRITE_FUNCTIONS
+    public:
     /**
      * @brief Sets custom serial read function
-     * This function must accept two parameters: pointer to buffer, where data will be stored
-     * and pointer to context (serial port object, or any other user-defined data)
-     * Function must return number of read bytes if data was read successfully, -1 otherwise
-     * @param readFunction Function pointer to custom read function
+     * 
+     * This function must accept two parameters: buffer, where data will be stored
+     * and pointer to context (serial port object, or any user-defined data, passed to function)
+     * 
+     * Function must return number of read bytes if data was read successfully, 0 otherwise
+     * 
+     * @param readFunction Custom read function
      * @param readCtx User-defined context, which will be passed to read function
      */
     void setSerialReadFunction(int (*readFunction)(char* buffer, uint16_t length, void* ctx), void* readCtx){
@@ -175,9 +172,13 @@ class ModbusRTU{
 
     /**
      * @brief Sets custom serial write function
-     * This function must accept three parameters: pointer to buffer, which holds data to be sent,
-     * length of data to be sent and pointer to context (serial port object, or any other user-defined data)
-     * @param writeFunction Function pointer to custom write function
+     * 
+     * This function must accept three parameters: buffer, which holds data to be sent,
+     * length of data to be sent and pointer to context (serial port object, or any user-defined data, passed to function)
+     * 
+     * Function must be of type void.
+     * 
+     * @param writeFunction Custom write function
      * @param writeCtx User-defined context, which will be passed to write function
      */
     void setSerialWriteFunction(void (*writeFunction)(const char* buffer, uint16_t length,  void* ctx), void* writeCtx){
@@ -185,23 +186,10 @@ class ModbusRTU{
         serialWriteCtx = writeCtx;
     }
 
-    /**
-     * @brief Sets ModbusRTU communication parameters. 
-     * 
-     * @param address Device Modbus address
-     * */
+    protected:
     void start(uint16_t address);
 
     #else
-
-    /**
-     * @brief Sets ModbusRTU communication parameters. 
-     * 
-     * @param address Device Modbus address
-     * @param baudRate Communication baud rate
-     * @param serialPort HardwareSerial port to be used (default: Serial)
-     * @param initialize If true, serial port will be initialized in this function (default: true)
-     */
     void start(uint16_t address, uint32_t baudRate, HardwareSerial& serialPort, bool initialize);
     #endif
 
@@ -216,24 +204,20 @@ class ModbusRTU{
 class ModbusRTUServer: public ModbusRTU{
 
     private:
-    #if !USE_EXTERNAL_INPUT_REGISTER_BUFFER
+    #if !USE_EXTERNAL_REGISTER_BUFFERS
     uint16_t inputRegisters[INPUT_REGISTER_NUM] = {0};
-    #else
-    uint16_t* inputRegisters = NULL;
-    #endif
-
-    #if !USE_EXTERNAL_HOLDING_REGISTER_BUFFER
     uint16_t holdingRegisters[HOLDING_REGISTER_NUM] = {0};
     #else
+    uint16_t* inputRegisters = NULL;
     uint16_t* holdingRegisters = NULL;
     #endif
 
-    void(*readInputRegistersEvent) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
-    void* readInputRegistersEventCtx = NULL;
-    void(*readHoldingRegistersEvent) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
-    void* readHoldingRegistersEventCtx = NULL;
-    void(*writeHoldingRegisterEvent) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
-    void* writeHoldingRegisterEventCtx = NULL;
+    void(*readInputRegistersCallback) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
+    void* readInputRegistersCallbackCtx = NULL;
+    void(*readHoldingRegistersCallback) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
+    void* readHoldingRegistersCallbackCtx = NULL;
+    void(*writeHoldingRegisterCallback) (uint8_t* buffer, uint16_t bufferLen, void* ctx) = NULL;
+    void* writeHoldingRegisterCallbackCtx = NULL;
 
     void sendErrorResponse(volatile requestPacket* packet, uint8_t error_code);
     void readRegistersHandler(volatile requestPacket* packet);
@@ -242,56 +226,67 @@ class ModbusRTUServer: public ModbusRTU{
 
     public:
     
-    #if USE_EXTERNAL_INPUT_REGISTER_BUFFER
+    #if USE_EXTERNAL_REGISTER_BUFFERS
     /**
      * @brief Sets custom buffer for input registers
-     * @param inputs Input registers
+     * @param inputs Input registers buffer
      */
     void setInputRegistersBuffer(uint16_t* inputs){inputRegisters = inputs;}
+
+    /**
+     * @brief Sets custom buffer for holding registers
+     * @param holding Holding registers buffer
+     */
+    void setHoldingRegistersBuffer(uint16_t* holding){holdingRegisters = holding;}
     #endif
 
     #if USE_EXTERNAL_HOLDING_REGISTER_BUFFER    
-    /**
-     * @brief Sets custom buffer for input registers
-     * @param inputs Input registers
-     * @param size Length of buffer
-     */
-        void setHoldingRegistersBuffer(uint16_t* holding){holdingRegisters = holding;}
+    
     #endif
 
     /**
-     * @brief Sets event, which will be called when input registers are read (right before response is sent)
-     * @param event Function pointer to event handler
-     * @param ctx User-defined context, which will be passed to event handler
+     * @brief Sets custom function, called when input registers are read (right before response is sent)
+     * 
+     * The function must accept three parameters: buffer with response data, length of data 
+     * in bytes and user-defined context
+     * 
+     * @param func Callback function
+     * @param ctx User-defined context passed to callback function
      */
-    void setReadInputRegistersEvent(void(*event) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
-        readInputRegistersEvent = event; readInputRegistersEventCtx = ctx;}
+    void setReadInputRegistersCallback(void(*func) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
+        readInputRegistersCallback = func; readInputRegistersCallbackCtx = ctx;}
 
     /**
-     * @brief Sets event, which will be called when holding registers are read (right before response is sent)
-     * @param event Function pointer to event handler
-     * @param ctx User-defined context, which will be passed to event handler
+     * @brief Sets custom function, called when holding registers are read (right before response is sent)
+     * 
+     * The function must accept three parameters: buffer with response data, length of data 
+     * in bytes and user-defined context
+     * @param func Callback function
+     * @param ctx User-defined context passed to callback function
      */
-    void setReadHoldingRegistersEvent(void(*event) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
-        readHoldingRegistersEvent = event; readHoldingRegistersEventCtx = ctx;}
+    void setReadHoldingRegistersCallback(void(*func) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
+        readHoldingRegistersCallback = func; readHoldingRegistersCallbackCtx = ctx;}
 
     /**
-     * @brief Sets event, which will be called when holding register is written (right before data are written)
-     * @param event Function pointer to event handler
-     * @param ctx User-defined context, which will be passed to event handler
+     * @brief Sets custom function, called when holding register is written (right before data are written)
+     * 
+     * The function must accept three parameters: buffer with request data, length of data 
+     * in bytes and user-defined context
+     * @param func Callback function
+     * @param ctx User-defined context passed to callback function
      */
-    void setWriteHoldingRegisterEvent(void(*event) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
-        writeHoldingRegisterEvent = event; writeHoldingRegisterEventCtx = ctx;}
+    void setWriteHoldingRegisterCallback(void(*func) (uint8_t* buffer, uint16_t bufferLen, void* ctx), void* ctx){
+        writeHoldingRegisterCallback = func; writeHoldingRegisterCallbackCtx = ctx;}
 
     #if !USE_CUSTOM_READ_WRITE_FUNCTIONS
     /**
      * @brief Sets ModbusRTU communication parameters. 
      * 
-     * @param address Device Modbus address
+     * @param address Device address
      * @param baudRate Communication baud rate
-     * @param serialPort HardwareSerial port to be used (default: Serial)
-     * @param initialize If true, serial port will be initialized in this function (default: true)
-     * @note Function sets the length of expected bytes to MODBUS_REQUEST_BASE_LENGTH
+     * @param serialPort Serial port to be used (default: Serial)
+     * @param initialize Set to false if serial port is being initialized manually, 
+     * outside of this function (default: true)
      */
     void startModbusServer(uint16_t address, uint32_t baudRate, HardwareSerial& serialPort = Serial, bool initialize = true){
         start(address, baudRate, serialPort, initialize);
@@ -308,60 +303,60 @@ class ModbusRTUServer: public ModbusRTU{
 
     /**
      * @brief Main communication loop. Call this function periodically.
-     * @return True if new data arrived (write request), false otherwise
+     * @return True if new data arrived (via WriteSingleRegister function), false otherwise or in case of error
      */
     bool communicationLoop();
 
     /**
-     * @brief Saves data to input registers buffer
+     * @brief Sets value of multiple input registers
      * 
-     * @param data Data to be saved
+     * @param startAddress Address of the first input register
+     * @param data Data to be set
      * @param length Length of data
-     * @param startAddress Start address in input registers buffer
      */
-    void copyToInputRegisters(uint16_t* data, uint16_t length, uint16_t startAddress);
+    void setMultipleInputRegistersValues(uint16_t startAddress, uint16_t* data, uint16_t length);
 
     /**
-     * @brief Saves data to holding registers buffer
+     * @brief Sets value of multiple holding registers
      * 
-     * @param data Data to be saved
+     * @param startAddress Address of the first holding register
+     * @param data Data to be set
      * @param length Length of data
-     * @param startAddress Start address in holding registers buffer
      */
-    void copyToHoldingRegisters(uint16_t* data, uint16_t length, uint16_t startAddress);
+    void setMultipleHoldingRegistersValues(uint16_t startAddress, uint16_t* data, uint16_t length);
 
     /**
      * @brief Reads data from holding registers buffer
      * 
-     * @param data Buffer where data will be stored
+     * @param startAddress Address of the first holding register
+     * @param data Buffer for read data
      * @param length Length of data to be read
-     * @param startAddress Start address in holding registers buffer
      */
-    void copyFromHoldingRegisters(uint16_t* data, uint16_t length, uint16_t startAddress);
+    void getMultipleHoldingRegistersValues(uint16_t startAddress, uint16_t* data, uint16_t length);
 
     /**
-     * @brief Sets single value in input registers buffer
+     * @brief Sets value of single input register
      * @param address Address of register
      * @param value Value to be set
      */
-    void setInputValue(uint16_t address, uint16_t value){
+    void setInputRegisterValue(uint16_t address, uint16_t value){
         if (address < INPUT_REGISTER_NUM) inputRegisters[address] = value;
     }
 
     /**
-     * @brief Sets single value in holding registers buffer
+     * @brief Sets value of single holding register
      * @param address Address of register
      * @param value Value to be set
      */
-    void setHoldingValue(uint16_t address, uint16_t value){
+    void setHoldingRegisterValue(uint16_t address, uint16_t value){
         if (address < HOLDING_REGISTER_NUM) holdingRegisters[address] = value;
     }
 
     /**
-     * @brief Gets single value from input registers buffer
+     * @brief Gets value of single holding register
      * @param address Address of register
      */
-    uint16_t getHoldingValue(uint16_t address){
+    uint16_t getHoldingRegisterValue(uint16_t address){
         if (address < HOLDING_REGISTER_NUM) return holdingRegisters[address];
         return 0;
     }
@@ -384,8 +379,9 @@ class ModbusRTUClient: public ModbusRTU{
      * 
      * @param address Device Modbus address
      * @param baudRate Communication baud rate
-     * @param serialPort HardwareSerial port to be used (default: Serial)
-     * @param initialize If true, serial port will be initialized in this function (default: true)
+     * @param serialPort Serial port to be used (default: Serial)
+     * @param initialize Set to false if serial port is being initialized manually, 
+     * outside of this function (default: true)
      */
     void startModbusClient(uint16_t address, uint32_t baudRate, HardwareSerial& serialPort = Serial, bool initialize = true){
         start(address, baudRate, serialPort, initialize);
@@ -405,44 +401,44 @@ class ModbusRTUClient: public ModbusRTU{
      * @brief Executes read input registers transaction
      * @param firstRegister Address of the first register
      * @param registerNum Number of registers
-     * @param registers Buffer where data will be stored
-     * @param timeout Transaction timeout (in microseconds)
-     * @param allowExceptions Whether treat exception as valid transaction
+     * @param registers Buffer to store input registers data
+     * @param timeout Transaction timeout (in milliseconds, default: 200)
+     * @param allowExceptions Whether treat exception as valid transaction (default: false)
      * @return 0 if response were successfully received, -1 otherwise, positive exception code in case of exception
      */
-    int ReadInputRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout = 200000, bool allowException = false);
+    int ReadInputRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout = 200, bool allowException = false);
 
     /**
      * @brief Executes read holding registers transaction
      * @param firstRegister Address of the first register
      * @param registerNum Number of registers
-     * @param registers Buffer where data will be stored
-     * @param timeout Transaction timeout (in microseconds)
-     * @param allowExceptions Whether treat exception as valid transaction
+     * @param registers Buffer to store holding registers data
+     * @param timeout Transaction timeout (in milliseconds, default: 200)
+     * @param allowExceptions Whether treat exception as valid transaction (default: false)
      * @return 0 if response were successfully received, -1 otherwise, positive exception code in case of exception
      */
-    int ReadHoldingRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout = 200000, bool allowException = false);
+    int ReadHoldingRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout = 200, bool allowException = false);
 
     /**
      * @brief Executes write single register transaction
      * @param firstRegister Address of the first register
      * @param data Single register data
-     * @param timeout Transaction timeout (in microseconds)
-     * @param allowExceptions Whether treat exception as valid transaction
+     * @param timeout Transaction timeout (in milliseconds, default: 200)
+     * @param allowExceptions Whether treat exception as valid transaction (default: false)
      * @return 0 if response were successfully received, -1 otherwise, positive exception code in case of exception
      */
-    int WriteSingleRegister(uint16_t firstRegister, uint16_t data, uint32_t timeout = 200000, bool allowException = false);
+    int WriteSingleRegister(uint16_t firstRegister, uint16_t data, uint32_t timeout = 200, bool allowException = false);
 
     /**
      * @brief Executes write multiple registers transaction
      * @param firstRegister Address of the first register
      * @param registerNum Number of registers
      * @param registers Buffer with registers data
-     * @param timeout Transaction timeout (in microseconds)
-     * @param allowExceptions Whether treat exception as valid transaction
+     * @param timeout Transaction timeout (in milliseconds, default: 200)
+     * @param allowExceptions Whether treat exception as valid transaction (default: false)
      * @return 0 if response were successfully received, -1 otherwise, positive exception code in case of exception
      */
-    int WriteMultipleRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout = 200000, bool allowException = false);
+    int WriteMultipleRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout = 200, bool allowException = false);
 
 };
 

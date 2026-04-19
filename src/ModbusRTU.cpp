@@ -6,7 +6,7 @@
  * 
  * @param packet_data Modbus packet in form of raw data
  * @param length Length of buffer (in bytes, excluding CRC)
- * @param response If false, calculated CRC is compared with request crc and result is returned.
+ * @param response If false, calculated CRC is compared with crc from packet and result is returned.
  * If true, CRC is calculated and stored at the end of message (return value is always true in this case).
  * @return Whether the CRCs match
  */
@@ -66,6 +66,15 @@ uint8_t ModbusRTU::recvData(volatile uint8_t* data, uint8_t length){
 }
 
 #if !USE_CUSTOM_READ_WRITE_FUNCTIONS
+    /**
+     * @brief Sets ModbusRTU communication parameters. 
+     * 
+     * @param address Device address
+     * @param baudRate Communication baud rate
+     * @param serialPort Serial port to be used (default: Serial)
+     * @param initialize Set to false if serial port is being initialized manually, 
+     * outside of this function
+     */
     void ModbusRTU::start(uint16_t address, uint32_t baudRate, HardwareSerial& serialPort, bool initialize){
         this->deviceAddress = address;
         defaultSerialCtx.serial = &Serial;
@@ -77,6 +86,11 @@ uint8_t ModbusRTU::recvData(volatile uint8_t* data, uint8_t length){
         defaultSerialCtx.byteTransTime = ((int)ceil(1000000 / baudRate)) * (1 + 8 + 1 + 1); //1 start bit + 8 data bits + parity + 1 stop bit
     }
 #else
+    /**
+     * @brief Sets ModbusRTU communication parameters. 
+     * 
+     * @param address Device address
+     * */
     void ModbusRTU::start(uint16_t address){
         this->deviceAddress = address;
     }
@@ -106,20 +120,20 @@ void ModbusRTUServer::readRegistersHandler(volatile requestPacket* packet){
 
     uint16_t* registers;
     uint8_t registerNum;
-    void(*event) (uint8_t* buffer, uint16_t bufferLen, void* ctx);
-    void* eventCtx;
+    void(*callback) (uint8_t* buffer, uint16_t bufferLen, void* ctx);
+    void* callbackCtx;
 
     if (packet->function_code == FC_READ_INPUT_REGISTERS){
         registers = inputRegisters;
         registerNum = INPUT_REGISTER_NUM;
-        event = readInputRegistersEvent;
-        eventCtx = readInputRegistersEventCtx;
+        callback = readInputRegistersCallback;
+        callbackCtx = readInputRegistersCallbackCtx;
     }
     else {
         registers = holdingRegisters;
         registerNum = HOLDING_REGISTER_NUM;
-        event = readHoldingRegistersEvent;
-        eventCtx = readHoldingRegistersEventCtx;
+        callback = readHoldingRegistersCallback;
+        callbackCtx = readHoldingRegistersCallbackCtx;
     }
 
     int bufferSize = MODBUS_RESPONSE_BASE_LENGTH + (packet->register_count * 2) + CRC_LEN;
@@ -148,8 +162,8 @@ void ModbusRTUServer::readRegistersHandler(volatile requestPacket* packet){
             put_16bit_into_byte_buffer(mbResponse, MODBUS_RESPONSE_BASE_LENGTH + (2 * i), endianity_swap_16bit(registers[packet->first_register + i]));
         }
 
-        if (event != NULL){
-            event(mbResponse, MODBUS_RESPONSE_BASE_LENGTH + (packet->register_count * 2), eventCtx);
+        if (callback != NULL){
+            callback(mbResponse, MODBUS_RESPONSE_BASE_LENGTH + (packet->register_count * 2), callbackCtx);
         }
         sendData(mbResponse, MODBUS_RESPONSE_BASE_LENGTH + (packet->register_count * 2));
     }
@@ -171,8 +185,8 @@ bool ModbusRTUServer::writeRegisterHandler(volatile requestPacket* packet){
         return false;
     }
 
-    if (writeHoldingRegisterEvent != NULL){
-        writeHoldingRegisterEvent((uint8_t*)packet, MODBUS_REQUEST_BASE_LENGTH, writeHoldingRegisterEventCtx);
+    if (writeHoldingRegisterCallback != NULL){
+        writeHoldingRegisterCallback((uint8_t*)packet, MODBUS_REQUEST_BASE_LENGTH, writeHoldingRegisterCallbackCtx);
     }
     holdingRegisters[packet->first_register] = packet->single_register_data;
 
@@ -219,7 +233,7 @@ bool ModbusRTUServer::communicationLoop(){
 
 
 //Data handlers
-void ModbusRTUServer::copyToInputRegisters(uint16_t* data, uint16_t length, uint16_t startAddress){
+void ModbusRTUServer::setMultipleInputRegistersValues(uint16_t startAddress, uint16_t* data, uint16_t length){
     if (startAddress + length <= INPUT_REGISTER_NUM){
         for (uint16_t i = 0; i < length; i++){
             inputRegisters[startAddress + i] = data[i];
@@ -227,7 +241,7 @@ void ModbusRTUServer::copyToInputRegisters(uint16_t* data, uint16_t length, uint
     }
 }
 
-void ModbusRTUServer::copyToHoldingRegisters(uint16_t* data, uint16_t length, uint16_t startAddress){
+void ModbusRTUServer::setMultipleHoldingRegistersValues(uint16_t startAddress, uint16_t* data, uint16_t length){
     if (startAddress + length <= HOLDING_REGISTER_NUM){
         for (uint16_t i = 0; i < length; i++){
             holdingRegisters[startAddress + i] = data[i];
@@ -235,7 +249,7 @@ void ModbusRTUServer::copyToHoldingRegisters(uint16_t* data, uint16_t length, ui
     }
 }
 
-void ModbusRTUServer::copyFromHoldingRegisters(uint16_t* data, uint16_t length, uint16_t startAddress){
+void ModbusRTUServer::getMultipleHoldingRegistersValues(uint16_t startAddress, uint16_t* data, uint16_t length){
     if (startAddress + length <= HOLDING_REGISTER_NUM){
         for (uint16_t i = 0; i < length; i++){
             data[i] = holdingRegisters[startAddress + i];
@@ -248,13 +262,13 @@ void ModbusRTUServer::copyFromHoldingRegisters(uint16_t* data, uint16_t length, 
 
 
 /**
- * @brief Executes read transaction
+ * @brief Executes read data transaction
  * @param packet Request packet
  * @param registers Received data registers
  * @param timeout Transaction timeout (in microseconds)
- * @param allowExceptions Whether treat exception as valid transaction
+ * @param allowExceptions Whether the exception should be treated as a valid transaction
  * 
- * @return 0 if response were successfully received, -1 otherwise, positive exception code in case of exception
+ * @return 0 if response was successfully received, -1 otherwise, positive exception code in case of exception
  */
 int ModbusRTUClient::readRegisters(requestPacket* packet, uint16_t* registers, uint32_t timeout, bool allowException){
     uint8_t registerCount = packet->register_count;
@@ -304,9 +318,9 @@ int ModbusRTUClient::readRegisters(requestPacket* packet, uint16_t* registers, u
  * @param packet Request packet
  * @param registers Request registers
  * @param timeout Transaction timeout (in microseconds)
- * @param allowExceptions Whether treat exception as valid transaction
+ * @param allowExceptions Whether the exception should be treated as a valid transaction
  * 
- * @return 0 if response were successfully received, -1 otherwise, positive exception code in case of exception
+ * @return 0 if response was successfully received, -1 otherwise, positive exception code in case of exception
  */
 int ModbusRTUClient::writeRegisters(requestPacket* packet, uint16_t* registers, uint32_t timeout, bool allowException){
     uint8_t registerCount = registers == NULL ? 0 : packet->register_count;
@@ -360,6 +374,7 @@ int ModbusRTUClient::writeRegisters(requestPacket* packet, uint16_t* registers, 
 }
 
 
+
 //Transaction handlers
 int ModbusRTUClient::ReadInputRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout, bool allowException){
     requestPacket packet;
@@ -367,7 +382,7 @@ int ModbusRTUClient::ReadInputRegisters(uint16_t firstRegister, uint16_t registe
     packet.function_code = FC_READ_INPUT_REGISTERS;
     packet.first_register = firstRegister;
     packet.register_count = registerNum;
-    return readRegisters(&packet, registers, timeout, allowException);
+    return readRegisters(&packet, registers, timeout * 1000, allowException);
 }
 
 int ModbusRTUClient::ReadHoldingRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout, bool allowException){
@@ -376,7 +391,7 @@ int ModbusRTUClient::ReadHoldingRegisters(uint16_t firstRegister, uint16_t regis
     packet.function_code = FC_READ_HOLDING_REGISTERS;
     packet.first_register = firstRegister;
     packet.register_count = registerNum;
-    return readRegisters(&packet, registers, timeout, allowException);
+    return readRegisters(&packet, registers, timeout * 1000, allowException);
 }
 
 int ModbusRTUClient::WriteSingleRegister(uint16_t firstRegister, uint16_t data, uint32_t timeout, bool allowException){
@@ -385,7 +400,7 @@ int ModbusRTUClient::WriteSingleRegister(uint16_t firstRegister, uint16_t data, 
     packet.function_code = FC_WRITE_SINGLE_REGISTER;
     packet.first_register = firstRegister;
     packet.register_count = data;
-    return writeRegisters(&packet, NULL, timeout, allowException);
+    return writeRegisters(&packet, NULL, timeout * 1000, allowException);
 }
 
 int ModbusRTUClient::WriteMultipleRegisters(uint16_t firstRegister, uint16_t registerNum, uint16_t* registers, uint32_t timeout, bool allowException){
@@ -394,7 +409,7 @@ int ModbusRTUClient::WriteMultipleRegisters(uint16_t firstRegister, uint16_t reg
     packet.function_code = FC_WRITE_MULTIPLE_REGISTERS;
     packet.first_register = firstRegister;
     packet.register_count = registerNum;
-    return writeRegisters(&packet, registers, timeout, allowException);
+    return writeRegisters(&packet, registers, timeout * 1000, allowException);
 }
 
 

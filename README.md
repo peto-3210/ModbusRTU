@@ -1,119 +1,139 @@
 # ModbusRTU
 ## Description
-Library for ModbusRTU communication protocol support which is able to run synchronously with main thread. Modbus is communication protocol based on 16-bit registers. Rtu version uses serial line (here, RTU means real-time UART).
-This ModbusRtu library is ultra light, so it implements only ReadInputRegisters, ReadHoldingRegisters and WriteSingleRegister functions on server and client side, and WriteMultipleRegisters only on client side.
-Due to it's lightweight nature, it does not take much computational power. Thus it can run on single-core CPUs with
-relatively low frequency (i.e. Arduino Uno) without significal inpact on main program performance.
+This is an implementation of ModbusRTU communication protocol, which is capable of running synchronously with main thread.
+
+Modbus is widely used among industrial automation devices. The data are held and transmitted using 16-bit registers. RTU version of the protocol uses serial line (here, Rtu means real-time UART) for for data transfer.
+
+This ModbusRtu library is ultra light, which means only ReadInputRegisters, ReadHoldingRegisters and WriteSingleRegister functions on both server and client side, and WriteMultipleRegisters only on client side are implemented.
+Due to it's lightweight nature, the communication does not take much computational power. Therefore, it can operate on single-core CPUs with relatively low frequency (i.e. Arduino Uno) without significal inpact on main program performance.
 
 ## Usage
 ### Minimal setup
 #### Basic communication
-Library uses default serial port for communication. Default settings are:
+Library uses default serial port for communication. Default communication settings are:
 - 8 bit transmission
 - 1 parity bit (even parity)
 - 1 stop bit
 
 These settings are required by ModbusRTU specification.
 
-User should pick one of the classes - **ModbusRTUServer** or **ModbusRTUClient**,
+User must pick one of the classes - **ModbusRTUServer** or **ModbusRTUClient**,
 according to their requirements. The base **ModbusRTU** class serves only as a common
 interface for data transmission.
 
 #### Basic functions - Server
-To initialize Modbus server, call *startModbusServer* function with specified
-device address and baud rate. If no serial port has been specified, default one
-will be initialized and used for communication.
+To initialize Modbus server, call *startModbusServer* function with
+device address and baud rate.
 
-To read and write values from/to specific registers, use *setInputValue*,
-*setHoldingValue* and *getHoldingValue* functions
+To read and write values from/to specific registers, use *setInputRegisterValue*,
+*setHoldingRegisterValue* and *getHoldingRegisterValue* methods
 with specified register address.
 
-To read and write bulks of datas, use *copyToInputRegisters*, *copyToHoldingRegisters*
-and *copyFromHoldingRegisters* functions. These function require buffer to copy data
+To read and write bulks of data, use *setMultipleInputRegistersValue*, *setMultipleHoldingRegistersValue*
+or *getMultipleHoldingRegistersValue* methods, respectively. These methods require buffer to copy data
 from/to, number of copied registers and address of first register.
 
-To operate modbus server, call *communicationLoop* function in main program
-loop. This function returns true if new data have been received (WriteSingleRegister function), false otherwise
+To operate modbus server, call *communicationLoop* method in main program
+loop. This method returns true if new data have been received (via WriteSingleRegister function), false otherwise
+or in case of error.
 
 #### Basic functions - Client
-To initialize Modbus client, call *startModbusClient* function with specified
-device address and baud rate. If no serial port has been specified, default one
-will be initialized and used for communication.
+To initialize Modbus client, call *startModbusClient* method with specified
+device address and baud rate.
 
-To read values from registers, use *readInputRegisters* and *readHoldingRegisters* functions.
+To read values from registers, use *readInputRegisters* and *readHoldingRegisters* methods.
+In each method, address of the first register, number of registers and buffer to store data to
+are required.
 
-To write data into registers, use *writeSingleRegister* and *writeMultipleRegisters* functions.
+To write data into registers, use *writeSingleRegister* and *writeMultipleRegisters* methods.
+In each method, address of the first register and the data to be written are required.
+In case of writting multiple registers, number of registers is also required.
 
-Optionally, user can decide whether should Modbus exception be considered as a valid response.
-In that case, exception code is retained from request which caused it.
-Also, user can specify timeout between request and respone (default is 200 ms).
+In each method, timeout (in milliseconds) for response can be set (default value is 200).
+Additionally, user can decide whether Modbus exception should be considered as a valid response.
+In that case, exception code is returned by method which caused it.
 
 ### Additional settings
-#### UART port configuration
-If the device contains more serial UART communication interfaces, user can specify
+#### Serial port configuration
+If the device contains more Serial communication interfaces, user can specify
 which one will be used by providing it as a parameter to *startModbusServer* or
-*startModbusClient* function.
+*startModbusClient* method. This can be usefull if user wants to utilize multiple
+instances of servers/clients on the same device.
 
 Additionally, if user wants to initialize serial port manually (perhaps with custom
-settings), they may set parameter *initialize* of *startModbus...* function to false. 
-In this case, user is responsible for initialising the serial port before calling this function.
+settings), a parameter *initialize* of *startModbus...* method must be set to **false**. 
+In this case, user is responsible for the serial port initialization before calling this method.
 
 #### Custom buffer definition
-In case user wants to use the custom register buffer for server instead of the default one, they can specify one using *setInputRegisteBuffer* function. Similar applies for holding
-register (*setHoldingRegisterBuffer* function). These buffers must be able to hold unsigned
-16-bit values.
+User can specify the number of Input and Holding registers using **INPUT_REGISTER_NUM** and
+**HOLDING_REGISTER_NUM**. Default value for both is 100.
 
-Additionally *USE_EXTERNAL_INPUT_REGISTER_BUFFER*,
-resp. *USE_EXTERNAL_HOLDING_REGISTER_BUFFER* must be set to **true**.
-**NOTE:** This setting can also be used if only client-side library will be used. In that case, default buffers will
-not be created, which will save some memory.
+In case user wants to use the custom register buffers for server instead of the default ones, macro
+**USE_EXTERNAL_REGISTER_BUFFERS** must be set to **true**. 
+Custom buffers must then be specified using *setInputRegisterBuffer* and *setHoldingRegisterBuffer* methods. 
+These buffers must be able to hold **INPUT_REGISTER_NUM** and **HOLDING_REGISTER_NUM** unsigned 16-bit values.
 
-In case the user wants to use the default register
-buffers, but with different size, they can modify *INPUT_REGISTER_NUM* and
-*HOLDING_REGISTER_NUM* defines.
+**NOTE:** **USE_EXTERNAL_REGISTER_BUFFERS** may also be set to **true** if only client-side library will be used. 
+In that case, default buffers will not be created, which will save some memory.
 
-By default, variable length buffer for raw data will be used each time the response is constructed (in case of server) or read (in case of client). In case user wants to fix the size of this buffer, they may set *USE_FIXED_SCRATCH_BUFFER_SIZE* define to **true**.  In this case, *SCRATCH_BUFFER_SIZE* define must be set to specify response buffer size. The size must be at least 8 bytes.
+By default, variable length buffer for raw data will be used each time the response is constructed (in case of server) or read (in case of client). If user wants to fix the size of this buffer, **USE_FIXED_SCRATCH_BUFFER_SIZE** must be set to **true**.  In this case, **SCRATCH_BUFFER_SIZE** must be set to specify response buffer size. 
+**NOTE:** The buffer must be at least 8 bytes long.
 
 #### Custom read/write functions
-To use custom function to read/write from/to a serial port, use *setSerialReadFunction*
-and *setSerialWriteFunction*. The custom function must accept these parameters:
+To use custom function to read/write from/to a serial port, **USE_CUSTOM_READ_WRITE_FUNCTIONS** must be set to **true**
+The custom functions must be specified using *setSerialReadFunction* and *setSerialWriteFunction* methods. The custom function must 
+accept these parameters:
 - buffer where to store request/response
 - length of buffer (number of bytes to send or number of bytes to read)
-- context - a void pointer used to pass custom function all 
-the data user decides to pass it
+- context - user-defined data passed to function
 
-  The context can be anything, f.e. a structure containig serial port handler
+The context can be anything, f.e. a structure containig serial port handler
 
 The write function return value is void.
 The read function value is number of read bytes, or 0 if nothing usable was received.
 
-Additionally, *USE_CUSTOM_READ_WRITE_FUNCTIONS* must be set to **true**
+**NOTE:** If custom functions to handle serial communication are used, serial port initialization must be
+done manually by user.
 
 #### Timestamp function
-By default, *micros* function is called to obtain current timestamp. This can be altered by modifying GET_TIMESTAMP_US define. The timestamp function mus return the value in microseconds, in **uint32_t** format.
+By default, *micros* function is called to obtain current timestamp. This can be altered by modifying **GET_TIMESTAMP_US**. The timestamp function must return the current timestamp value in microseconds, in **uint32_t** format.
 
 #### Request callbacks (server only)
-Library supports user-defined callbacks which are called when specific request is received.
+Library supports user-defined callbacks, which are called when specific request is received.
 
-To set callback for ReadInputRegisters request, use *setReadInputRegistersCallback* function. This callback is called right before the response is sent.
+To set callback for ReadInputRegisters request, use *setReadInputRegistersCallback* method. This callback is called right before the response is sent.
 
-To set callback for ReadHoldingRegisters request, use *setReadHoldingRegistersCallback* function. This callback is called right before the response is sent.
+To set callback for ReadHoldingRegisters request, use *setReadHoldingRegistersCallback* method. This callback is called right before the response is sent.
 
-To set callback for WriteSingleRegister request, use *setWriteHoldingRegisterCallback* function. This callback is called right after the request is received, before data are stored in specified register.
+To set callback for WriteSingleRegister request, use *setWriteHoldingRegisterCallback* method. This callback is called right after the request is received, before data are stored in specified register.
 
 Each callback function must accept these parameters:
 - buffer with request/response data
 - length of the buffer
-- context - a void pointer used to pass custom function all the data user decides to pass it
-
-To register function as a callback, use the corresponding *set...Callback* function. The context parameter can be used to pass any data user wants to the callback function.
+- context - user-defined data passed to function
 
 ### Implementation limits and further usage
-Server-side library is set to accept only one request at a time. Additionally, the request must be 8 bytes long. This may be drawbacks for some use cases,
-but it enables further optimization. For example, DMA can be used to transfer data from serial buffer. Also, no time is wasted by polling serial line for potential data, when size of the packet is unknown. 
+Library can handle multiple Modbus servers or clients in same program, but each one of them must use
+unique serial port. If the device has multiple serial ports, the custom one must be specified when
+calling *startModbusServer* or *startModbusClient* method.
 
-There is also timeout for transaction (from the first byte to the last one), so if the data are not fully received within specified time, they are discarded.
-This way, the buffer is not getiting clogged with fragments of messages.
+Server-side library is set to accept only one request at a time. Additionally, the request packet must be exactly 8 bytes long. This may be drawbacks for some use cases,
+but it enables further optimization. For instance, DMA mechanism can be used to transfer data from serial buffer. Also, when the size of the packet is known in advance, no time is wasted by polling serial line for potential data. 
+
+Each reading has a timeout (from the first byte to the last one), so if the expected number of bytes is not fully received within specified time, all read bytes are discarded. Moreover, if there are still some bytes in receive buffer after reading,
+the trailing bytes are flushed.
+This way, the buffer is not getiting clogged with fragments of messages. 
+**NOTE**: This is true only if the default functions for sending and receiving data through serial line are used.
 
 Although library was build using Arduino framework, it is possible to use it even outside
-Arduino environment (see **Custom read/write functions** and **Timestamp functions**).
+Arduino environment.
+This might be achieved by utilizing these steps:
+- modify **GET_TIMESTAMP_US** to use platform-specific function with same behaviour as *micros*
+- set **USE_CUSTOM_READ_WRITE_FUNCTIONS** to **true** and provide platform-specific
+functions to operate serial line using *setSerialReadFunction* and *setSerialWriteFunction* methods.
+Serial port must then be initialized manually by the user.
+
+This way, the library will only used for communication packets handling, without physically 
+sending/receiving any data.
+Thus, the library can be used in every device with UART interface (even on Computers).
+
