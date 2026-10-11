@@ -3,7 +3,7 @@
 
 /*This example demonstrates the usage of modbus client and data manipulation by writting and reading mock data.
 You can test the example using simple modbus
-client, for example pymodslave, or ServerExample from this library. 
+server, for example pymodslave, or ServerExample from this library.
 */
 
 //Client object declaration
@@ -20,14 +20,18 @@ void loop(){
     //Read input registers into buffer.
     modbus.ReadInputRegisters(0, 3, buffer1);
 
-    //Read input registers into buffer with timeout, allowing exception as valid response.
-    modbus.ReadInputRegisters(4, 3, buffer1, 200000, true);
+    //Read input registers into buffer with a 500 ms timeout, allowing an
+    //exception response to count as a valid transaction.
+    modbus.ReadInputRegisters(4, 3, buffer1, 500, true);
 
 
     uint16_t buffer2[3] = {1, 2, 3};
 
-    //Write multiple registers, then write single register.
+    //Write multiple registers (function code 16).
+    //NOTE: this library implements function code 16 on the CLIENT side only..
     modbus.WriteMultipleRegisters(0, 3, buffer2);
+
+    //Write a single register (function code 6), which ServerExample does support.
     modbus.WriteSingleRegister(1, 4);
 
     //Verify that registers were written by reading them back.
