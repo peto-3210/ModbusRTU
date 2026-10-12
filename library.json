@@ -1,6 +1,6 @@
 {
   "name": "ModbusRTU",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "description": "This library provides interface for Modbus RTU communication via serial line (UART). It is lightweight enough to be able to run alongside main program without significant performance drop.",
   "keywords": "ModbusRTU, Modbus, RTU, serial, UART, communication, lightweight",
   "repository":
