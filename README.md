@@ -134,7 +134,7 @@ The reading of each packet has a timeout (from the first byte to the last one), 
 the trailing bytes are flushed.
 This way, the buffer is not getiting clogged with fragments of messages. 
 **NOTE**: This is true only if the default functions for sending and receiving data through serial line are used. 
-Otherwise, the user must implement this functionality manually in the custom read/write functions.
+Otherwise, user must implement this functionality manually in their custom read/write functions.
 
 Although library was build using Arduino framework, it is possible to use it even outside
 Arduino environment.
@@ -145,5 +145,4 @@ functions to operate serial line using *setSerialReadFunction* and *setSerialWri
 
 If all steps from above are applied, the library will only be used for communication packets handling, without physically 
 sending/receiving any data.
-Therefore, it can be used in every device with UART interface.
 
